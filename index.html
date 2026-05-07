@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>X Account Analyzer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #080808; color: #eee; font-family: system-ui, sans-serif; }
+    #root { max-width: 480px; margin: 0 auto; min-height: 100vh; }
+    input::placeholder { color: #333; }
+    input:focus { outline: none; border-color: #00e676 !important; }
+    button:active { transform: scale(0.98); }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade { animation: fadeIn 0.3s ease; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    // ── CONFIG ──────────────────────────────────────────
+    const CONTRACT = "0xD2AD10F14F698Abed61fC4F372F25b9443aAf77A";
+    const WALLET   = "0xeb350f1692b16c8b7b02c66dedb76d018f6a9662";
+    const RPC      = "https://studio.genlayer.com/api";
+
+    // ── RPC HELPERS ─────────────────────────────────────
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    async function sendTx(method, params) {
+      const res = await fetch(RPC, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "eth_sendTransaction",
+          params: [{ from: WALLET, to: CONTRACT, data: JSON.stringify({ method, params }) }],
+        }),
+      });
+      const data = await res.json();
+      return data.result || null;
+    }
+
+    async function callView(method, params = []) {
+      const res = await fetch(RPC, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "eth_call",
+          params: [{ to: CONTRACT, data: JSON.stringify({ method, params }) }, "latest"],
+        }),
+      });
+      const data = await res.json();
+      try { return JSON.parse(data.result); } catch { return null; }
+    }
+
+    async function waitTx(hash, timeout = 90000) {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        await sleep(3000);
+        try {
+          const res = await fetch(RPC, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jsonrpc: "2.0", id: 1,
+              method: "eth_getTransactionReceipt",
+              params: [hash],
+            }),
+          });
+          const data = await res.json();
+          if (data.result?.status === "0x1") return true;
+        } catch {}
+      }
+      return false;
+    }
+
+    // ── VERDICT CONFIG ───────────────────────────────────
+    const VERDICTS = {
+      definitely_human: { label: "Definitely Human", emoji: "✅", color: "#00e676" },
+      likely_human:     { label: "Likely Human",     emoji: "🟢", color: "#69f0ae" },
+      suspicious:       { label: "Suspicious",       emoji: "🟡", color: "#ffee58" },
+      likely_bot:       { label: "Likely Bot",       emoji: "🔴", color: "#ff7043" },
+      definitely_bot:   { label: "Definitely Bot",   emoji: "🚨", color: "#f44336" },
+    };
+
+    function getScoreColor(s) {
+      if (s <= 25) return "#00e676";
+      if (s <= 50) return "#69f0ae";
+      if (s <= 65) return "#ffee58";
+      if (s <= 80) return "#ff7043";
+      return "#f44336";
+    }
+
+    // ── SCORE RING ───────────────────────────────────────
+    function ScoreRing({ score }) {
+      const color = getScoreColor(score);
+      const r = 44, circ = 2 * Math.PI * r;
+      const offset = circ - (score / 100) * circ;
+      return (
+        <div style={{ position:"relative", width:110, height:110, flexShrink:0 }}>
+          <svg width="110" height="110" style={{ transform:"rotate(-90deg)" }}>
+            <circle cx="55" cy="55" r={r} fill="none" stroke="#1a1a1a" strokeWidth="8" />
+            <circle cx="55" cy="55" r={r} fill="none" stroke={color} strokeWidth="8"
+              strokeDasharray={circ} strokeDashoffset={offset}
+              style={{ transition:"stroke-dashoffset 1s ease", strokeLinecap:"round" }} />
+          </svg>
+          <div style={{ position:"absolute", inset:0, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" }}>
+            <span style={{ fontSize:26, fontWeight:900, color, fontFamily:"monospace" }}>{score}</span>
+            <span style={{ fontSize:9, color:"#555", fontFamily:"monospace", letterSpacing:1 }}>BOT SCORE</span>
+          </div>
+        </div>
+      );
+    }
+
+    // ── TAG ──────────────────────────────────────────────
+    function Tag({ text, type }) {
+      const isRed = type === "red";
+      return (
+        <span style={{
+          display:"inline-block", fontSize:11, padding:"3px 10px", borderRadius:3, margin:"3px 3px 3px 0",
+          background: isRed ? "#2a0a0a" : "#0a2a15",
+          color: isRed ? "#ff7043" : "#69f0ae",
+          border: `1px solid ${isRed ? "#ff704322" : "#69f0ae22"}`,
+          fontFamily:"monospace",
+        }}>
+          {isRed ? "⚠ " : "✓ "}{text}
+        </span>
+      );
+    }
+
+    // ── CARD ─────────────────────────────────────────────
+    function Card({ children, style }) {
+      return (
+        <div style={{ background:"#0d0d0d", border:"1px solid #1a1a1a", borderRadius:10, padding:16, ...style }}>
+          {children}
+        </div>
+      );
+    }
+
+    function Label({ text }) {
+      return <div style={{ fontSize:9, color:"#444", fontFamily:"monospace", letterSpacing:2, marginBottom:10 }}>{text}</div>;
+    }
+
+    // ── MAIN APP ─────────────────────────────────────────
+    function App() {
+      const [input, setInput]   = useState("");
+      const [status, setStatus] = useState("idle");
+      const [step, setStep]     = useState("");
+      const [result, setResult] = useState(null);
+      const [error, setError]   = useState("");
+
+      async function handleAnalyze() {
+        const val = input.trim();
+        if (!val) return;
+        setStatus("loading"); setResult(null); setError("");
+
+        try {
+          setStep("Submitting to GenLayer blockchain...");
+          const txHash = await sendTx("analyze", [val]);
+          if (!txHash) throw new Error("Transaction failed to submit");
+
+          setStep("Waiting for AI consensus (Optimistic Democracy)...");
+          const ok = await waitTx(txHash, 90000);
+          if (!ok) throw new Error("Transaction timed out. Try again.");
+
+          setStep("Fetching AI verdict...");
+          await sleep(1000);
+          const data = await callView("get_last_result");
+          if (!data || data.error) throw new Error("Could not fetch result");
+
+          setResult(data);
+          setStatus("done");
+          setStep("");
+        } catch (err) {
+          setError(err.message || "Something went wrong");
+          setStatus("error");
+          setStep("");
+        }
+      }
+
+      function reset() {
+        setInput(""); setStatus("idle");
+        setResult(null); setError(""); setStep("");
+      }
+
+      const vc = result ? (VERDICTS[result.verdict] || VERDICTS.suspicious) : null;
+
+      return (
+        <div style={{ minHeight:"100vh" }}>
+          {/* Header */}
+          <div style={{ padding:"28px 20px 20px", borderBottom:"1px solid #111", textAlign:"center" }}>
+            <div style={{ fontSize:28, fontWeight:900, fontFamily:"monospace", letterSpacing:-1 }}>
+              <span style={{ color:"#00e676" }}>X</span>
+              <span style={{ color:"#eee" }}>Account</span>
+              <span style={{ color:"#444" }}>Analyzer</span>
+            </div>
+            <div style={{ fontSize:10, color:"#333", fontFamily:"monospace", marginTop:4, letterSpacing:2 }}>
+              POWERED BY GENLAYER AI · BRADBURY TESTNET
+            </div>
+          </div>
+
+          {/* Body */}
+          <div style={{ padding:"16px 16px 40px", display:"flex", flexDirection:"column", gap:12 }}>
+
+            {/* Input */}
+            {status !== "done" && (
+              <Card>
+                <Label text="ENTER X ACCOUNT" />
+                <input
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && status === "idle" && handleAnalyze()}
+                  placeholder="https://x.com/username  or  @username"
+                  disabled={status === "loading"}
+                  style={{
+                    width:"100%", background:"#111", border:"1px solid #222", borderRadius:6,
+                    padding:"12px 14px", color:"#eee", fontSize:13, fontFamily:"monospace",
+                    marginBottom:10,
+                  }}
+                />
+                <button
+                  onClick={handleAnalyze}
+                  disabled={status === "loading" || !input.trim()}
+                  style={{
+                    width:"100%", padding:13, background:"#00e676", color:"#000", border:"none",
+                    borderRadius:6, fontFamily:"monospace", fontSize:13, fontWeight:700,
+                    cursor:"pointer", letterSpacing:2,
+                    opacity: (!input.trim() || status === "loading") ? 0.4 : 1,
+                  }}
+                >
+                  {status === "loading" ? "ANALYZING..." : "ANALYZE →"}
+                </button>
+              </Card>
+            )}
+
+            {/* Loading */}
+            {status === "loading" && (
+              <Card>
+                <div style={{ textAlign:"center", padding:"16px 0" }}>
+                  <div style={{ width:32, height:32, border:"3px solid #1a1a1a", borderTop:"3px solid #00e676",
+                    borderRadius:"50%", animation:"spin 0.8s linear infinite", margin:"0 auto" }} />
+                  <div style={{ fontFamily:"monospace", color:"#00e676", fontSize:12, marginTop:16 }}>{step}</div>
+                  <div style={{ fontFamily:"monospace", color:"#333", fontSize:10, marginTop:8 }}>This may take 30–60 seconds</div>
+                </div>
+              </Card>
+            )}
+
+            {/* Error */}
+            {status === "error" && (
+              <Card style={{ border:"1px solid #ff704333" }}>
+                <div style={{ fontFamily:"monospace", color:"#ff7043", fontSize:12, marginBottom:12 }}>⚠ {error}</div>
+                <button onClick={reset} style={{ width:"100%", padding:12, background:"transparent", color:"#555",
+                  border:"1px solid #222", borderRadius:6, fontFamily:"monospace", fontSize:13, cursor:"pointer", letterSpacing:2 }}>
+                  TRY AGAIN
+                </button>
+              </Card>
+            )}
+
+            {/* Result */}
+            {status === "done" && result && (
+              <div className="fade">
+                <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+
+                  {/* Score */}
+                  <Card style={{ border:`1px solid ${vc.color}22` }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:20 }}>
+                      <ScoreRing score={result.bot_score || 0} />
+                      <div style={{ flex:1 }}>
+                        <div style={{ fontFamily:"monospace", fontSize:11, color:"#555", marginBottom:4 }}>@{result.username}</div>
+                        <div style={{ fontSize:18, fontWeight:700, color:vc.color, fontFamily:"monospace" }}>
+                          {vc.emoji} {vc.label}
+                        </div>
+                        <div style={{ fontSize:11, color:"#555", fontFamily:"monospace", marginTop:6 }}>
+                          Est. bot followers: <span style={{ color:"#aaa" }}>{result.bot_follower_estimate || "N/A"}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* Stats */}
+                  <Card>
+                    <Label text="ACCOUNT STATS" />
+                    <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+                      {[
+                        ["Followers",   result.followers],
+                        ["Following",   result.following],
+                        ["Ratio",       result.follower_ratio],
+                        ["Account Age", result.account_age],
+                        ["Engagement",  result.engagement_quality],
+                        ["Bot Est.",    result.bot_follower_estimate],
+                      ].map(([label, val]) => (
+                        <div key={label} style={{ background:"#111", borderRadius:6, padding:"8px 10px" }}>
+                          <div style={{ fontSize:9, color:"#444", fontFamily:"monospace", marginBottom:3, letterSpacing:1 }}>{label}</div>
+                          <div style={{ fontSize:12, color:"#ddd", fontFamily:"monospace" }}>{val || "N/A"}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  {/* Red flags */}
+                  {result.red_flags && result.red_flags.length > 0 && (
+                    <Card>
+                      <Label text="RED FLAGS" />
+                      <div>{result.red_flags.map((f, i) => <Tag key={i} text={f} type="red" />)}</div>
+                    </Card>
+                  )}
+
+                  {/* Green flags */}
+                  {result.green_flags && result.green_flags.length > 0 && (
+                    <Card>
+                      <Label text="GREEN FLAGS" />
+                      <div>{result.green_flags.map((f, i) => <Tag key={i} text={f} type="green" />)}</div>
+                    </Card>
+                  )}
+
+                  {/* AI Reason */}
+                  {result.reason && (
+                    <Card>
+                      <Label text="AI ANALYSIS" />
+                      <div style={{ fontSize:13, color:"#888", lineHeight:1.7, fontStyle:"italic" }}>"{result.reason}"</div>
+                    </Card>
+                  )}
+
+                  {/* Footer */}
+                  <Card style={{ background:"transparent", border:"1px solid #111", textAlign:"center" }}>
+                    <div style={{ fontSize:10, color:"#333", fontFamily:"monospace", lineHeight:1.8 }}>
+                      🤖 Analysis by GenLayer Intelligent Contract<br/>
+                      ⛓ Optimistic Democracy · Bradbury Testnet<br/>
+                      📄 {CONTRACT.slice(0,10)}...{CONTRACT.slice(-6)}
+                    </div>
+                  </Card>
+
+                  <button onClick={reset} style={{ width:"100%", padding:13, background:"#00e676", color:"#000",
+                    border:"none", borderRadius:6, fontFamily:"monospace", fontSize:13, fontWeight:700,
+                    cursor:"pointer", letterSpacing:2 }}>
+                    ANALYZE ANOTHER →
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
